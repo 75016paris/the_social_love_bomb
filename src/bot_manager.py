@@ -182,52 +182,42 @@ class BotManager:
 
 
     def execute_request(self, bot_name: str, request_func: Any, endpoint: str, **kwargs) -> Optional[Any]:
-        """
-        Execute a Twitter API request with retries and rate limit handling.
-        """
         retries = 3  # Number of retry attempts
         for attempt in range(retries):
             try:
-                # Log request details
                 logger.info(f"🔍 Attempting request for {bot_name} - Endpoint: {endpoint}")
-                logger.debug(f"🔑 Parameters: {kwargs}")
 
                 # Check rate limit for this endpoint
                 if self.is_rate_limited(bot_name, endpoint):
                     reset_time = self.rate_limited_endpoints[bot_name][endpoint]
                     wait_time = max(0, reset_time - time.time())
                     logger.info(f"⏳ Waiting {wait_time:.2f}s for bot {bot_name}, endpoint {endpoint} rate limit reset.")
-                    time.sleep(wait_time)
+
+                    if endpoint == "search_recent_tweets":
+                        logger.warning(f"Rate limit hit, skipping mentions processing for {bot_name}")
+                        return None  # Simply skip instead of incorrect recursion
 
                 # Make the API request
                 response = request_func(**kwargs)
-
-                # Log successful response
                 logger.info(f"📥 Response received for {bot_name} - Endpoint: {endpoint}")
-
-                # Process headers for rate limits
-                if hasattr(response, "headers") and response.headers:
-                    headers = response.headers
-                    self._process_rate_limit_headers(bot_name, endpoint, headers)
-
                 return response
 
             except tweepy.errors.TooManyRequests as e:
                 # Handle rate limit error
                 reset_time = self._handle_rate_limit_error(bot_name, endpoint, e)
+                logger.warning(f"⚠️ Rate limit hit for {bot_name}, endpoint {endpoint}.")
+                if endpoint == "search_recent_tweets":
+                    logger.warning(f"Switching to process_article for {bot_name}.")
+                    self.process_article(bot_name)  # Transition to processing articles
+                    return None
+
                 wait_time = max(0, reset_time - time.time())
-                logger.warning(f"⚠️ Rate limit hit for {bot_name}, endpoint {endpoint}. Retrying in {wait_time:.2f}s.")
                 time.sleep(wait_time)
 
             except Exception as e:
-                # Log other exceptions
                 logger.error(f"❌ Error on attempt {attempt + 1}/{retries} for {bot_name}, endpoint {endpoint}: {e}")
-                if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
-                    logger.error(f"   Status Code: {e.response.status_code}")
-                    logger.error(f"   Response Body: {e.response.text}")
                 time.sleep(2)
 
-        # If all retries fail
         logger.error(f"❌ All retries failed for bot {bot_name}, endpoint {endpoint}. Giving up.")
         return None
 
@@ -292,15 +282,14 @@ class BotManager:
             return False
 
 
-    def process_mentions(self, bot: Bot) -> bool:
-        """Process replies to the bot's last tweets."""
+    def process_mentions(self, bot: Bot, next_article: Optional[Tuple[str, str]] = None) -> bool:
         client = self.get_api_client(bot)
         if not client:
             logger.error(f"Failed to create API client for bot {bot.name}.")
             return False
 
         try:
-            # Récupérer les derniers tweets du bot
+            # Fetch the last tweets of the bot
             recent_tweets = self.execute_request(
                 bot_name=bot.name,
                 request_func=client.get_users_tweets,
@@ -309,20 +298,12 @@ class BotManager:
                 max_results=5
             )
 
-            # Vérification COMPLÈTE des tweets récents
-            if not recent_tweets:
-                logger.info(f"No tweets returned for bot {bot.name}")
-                return False
-                
-            if not hasattr(recent_tweets, 'data'):
-                logger.info(f"No data attribute in tweets for bot {bot.name}")
-                return False
-                
-            if not recent_tweets.data:
-                logger.info(f"Empty data in tweets for bot {bot.name}")
+            if not recent_tweets or not hasattr(recent_tweets, 'data'):
+                logger.info(f"No tweets to process, switching to article")
+                if next_article:
+                    return self.process_article(bot, next_article[0], next_article[1])
                 return False
 
-            # Check each tweet for replies
             for tweet in recent_tweets.data:
                 replies = self.execute_request(
                     bot_name=bot.name,
@@ -332,37 +313,27 @@ class BotManager:
                     max_results=10
                 )
 
-                if not replies or not hasattr(replies, 'data') or not replies.data:
-                    continue
-
-                if not replies or not hasattr(replies, 'data'):
-                    continue
-
-                for reply in replies.data:
-                    # Ensure it's a valid reply and generate a response
-                    if reply.author_id != bot.user_id:
-                        response_text = generate_reply(
-                            headline=tweet.text,
-                            bot_identity=bot.identity,
-                            reply_text=reply.text
-                        )
-                        if response_text:
-                            success = self.execute_request(
-                                bot_name=bot.name,
-                                request_func=client.create_tweet,
-                                endpoint="reply_tweet",
-                                text=response_text,
-                                in_reply_to_tweet_id=reply.id
+                if replies and hasattr(replies, 'data') and replies.data:
+                    for reply in replies.data:
+                        if reply.author_id != bot.user_id:
+                            response_text = generate_reply(
+                                headline=tweet.text,
+                                bot_identity=bot.identity,
+                                reply_text=reply.text
                             )
-                            if success:
-                                logger.info(f"Reply posted for bot {bot.name} to reply ID {reply.id}")
-                                return True
-                            
-            
+                            if response_text:
+                                self.execute_request(
+                                    bot_name=bot.name,
+                                    request_func=client.create_tweet,
+                                    endpoint="reply_tweet",
+                                    text=response_text,
+                                    in_reply_to_tweet_id=reply.id
+                                )
+            return True
+
         except Exception as e:
-            logger.error(f"Error processing mentions for bot {bot.name}: {e}", exc_info=True)
+            logger.error(f"Error processing mentions for bot {bot.name}: {e}")
             return False
-        return False
 
 
     def fetch_replies_in_batches(self, client, bot_name: str, tweet_id: str, batch_size: int = 10):

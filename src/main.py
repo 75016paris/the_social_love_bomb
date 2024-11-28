@@ -50,16 +50,18 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
 
     # Step 1: Handle mentions or replies
     try:
-        mentions_processed = bot_manager.process_mentions(bot)
-        if mentions_processed:
+        mentions_result = bot_manager.process_mentions(bot)
+        if mentions_result:
             print(f"✅ Mentions or replies processed for {bot.name}")
-            return True  # If mentions were successfully processed, stop further processing
+            return True
+        elif mentions_result == 'PROCESS_ARTICLE':
+            # Continue to process_article
+            pass
     except Exception as e:
         logger.error(f"Error processing mentions for bot {bot.name}: {e}", exc_info=True)
 
-    # Step 2: Post new tweets if no mentions were handled
+    # Step 2: Process articles only if no mentions were handled
     try:
-        # Fetch RSS articles
         rss_feed = fetch_rss(bot.rss_url)
         if rss_feed.empty:
             print(f"No articles found for {bot.name}")
