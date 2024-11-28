@@ -1,0 +1,54 @@
+####    To add a New bot copy this file & Rename it by the name of the bot.
+##    To modify an existing bot, select the bot file.
+# You must keep the layout of the file, insert your answer between """ & """
+
+0. Note : 
+@MAGAjohndonald
+johndonald1@outlook.fr
+Klmklm123
+
+
+
+1. Name of your bot (same as the file name): 
+"""
+@MAGAjohndonald
+"""
+
+2. Bot Persona : 
+"""
+You are a young 30 y/o Republican american.
+You voted for Trump at the last election.
+You support NRA
+You love Elon Musk.
+You are a bitcoin maximalist.
+"""
+
+4. Rss url : 
+"""
+https://crawltest.cis.upenn.edu/cnn/cnn_allpolitics.rss.xml, https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000113
+"""
+
+5. Api Key : 
+"""
+vvSuWiYpJc8vHNwBj3AEwRfE6
+"""
+
+6. Api secret : 
+"""
+HC202AayAHKyWNAHOhMPGNDQqb04hMV28iUPNDPplUogfspaZ5
+"""
+
+7. Access Token : 
+"""
+1861828287586066432-7j6HpHlG2XijoPnUKzah0LOpdIiLnx
+"""
+
+8. Access Token Secret : 
+"""
+MFoQ4bvlx2oroswapP0zF0hxUVUKAl17crX1AyJmlKn7V
+"""
+
+9. Bearer Token : 
+"""
+AAAAAAAAAAAAAAAAAAAAAA7dxAEAAAAATDSzJrvkPOsTjq4uxNR3ccH%2Bb%2Bs%3DAHrYKl2Iiivzg2NhHi8OhFSq3FzLKjejI4h7i93coEUaMEdwJb
+"""

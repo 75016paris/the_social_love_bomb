@@ -1,3 +1,4 @@
 .DS_Store
 .history/
 the_love_bomb_env/
+**/__pycache__/
