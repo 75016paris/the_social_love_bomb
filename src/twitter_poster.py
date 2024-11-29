@@ -10,22 +10,21 @@ logger = logging.getLogger(__name__)
 
 def create_api(api_config):
     """
-    Creates and returns a Twitter API client with detailed logging.
+    Creates and returns a Twitter API client with rate limit handling disabled.
     """
     try:
         logger.info(f"Creating API client for API key: {api_config['api_key'][:5]}...")
 
-        # Create the client
+        # Create the client with wait_on_rate_limit set to False
         client = tweepy.Client(
             bearer_token=api_config['bearer_token'].strip(),
             consumer_key=api_config['api_key'].strip(),
             consumer_secret=api_config['api_secret'].strip(),
             access_token=api_config['access_token'].strip(),
             access_token_secret=api_config['access_token_secret'].strip(),
-            wait_on_rate_limit=True
+            wait_on_rate_limit=False  # Changed to False to prevent automatic waiting
         )
 
-        # Return the client
         return client
 
     except Exception as e:
@@ -68,18 +67,21 @@ def post_or_reply_to_tweet(bot_name, text, api_config, tweet_id=None):
     
 def get_user_tweets(self, bot, max_results=10):
     try:
-        # S'assurer que le bot a un user_id
+        # Ensure bot has a user_id
         if not bot.user_id:
             me = self.client.get_me()
             self.db.update_user_id(bot.id, me.data.id)
 
-        # S'assurer que max_results est valide (5-100)
+        # Ensure max_results is valid (5-100)
         valid_max_results = max(5, min(100, max_results))
 
         return self.client.get_users_tweets(
             id=bot.user_id,
             max_results=valid_max_results
         )
+    except tweepy.errors.TooManyRequests:
+        logger.warning(f"Rate limit hit for {bot.name}")
+        return None
     except Exception as e:
         logger.error(f"Error getting tweets for {bot.name}: {e}")
         return None

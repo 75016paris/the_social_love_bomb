@@ -31,7 +31,7 @@ def countdown_timer(seconds, message):
     print()
 
 def process_bot(bot_manager: BotManager, bot) -> bool:
-    """Process a single bot with optimized rate limit handling."""
+    """Process a single bot with improved rate limit handling."""
     print(f"\n{'=' * 50}")
     print(f"Processing articles for bot: {bot.name}")
     print(f"Identity: {bot.identity[:50]}...")
@@ -40,8 +40,8 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
 
     # Check global rate limit
     if bot_manager.is_bot_rate_limited(bot.name):
-        print(f"⚠️ Bot {bot.name} is globally rate limited. Skipping...")
-        return False
+        print(f"⚠️ Bot {bot.name} is globally rate limited. Trying article posting...")
+        return process_article_directly(bot_manager, bot)
 
     # Use a cache file to track the last action
     cache_file = bot_manager.cache_dir / f"{bot.name}_last_action.txt"
@@ -53,9 +53,10 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
     current_action = "mentions" if last_action == "article" else "article"
     success = False
 
-    # Si l'action est article ou si on est rate limited sur get_users_tweets
-    if current_action == "article" or bot_manager.is_rate_limited(bot.name, "get_users_tweets"):
+    def process_article_directly(bot_manager, bot):
+        """Helper function to process articles."""
         try:
+            print(f"📰 Looking for new articles to post...")
             rss_feed = fetch_rss(bot.rss_url)
             if not rss_feed.empty:
                 for _, article in rss_feed.iterrows():
@@ -67,17 +68,21 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
                         )
                         if success:
                             print(f"✅ New article posted for {bot.name}")
-                            break
-            if not success:
-                print(f"No new articles to post for {bot.name}")
+                            return True
+            print(f"No new articles to post for {bot.name}")
+            return False
         except Exception as e:
             logger.error(f"Error processing article for {bot.name}: {e}")
+            return False
+
+    if current_action == "article":
+        success = process_article_directly(bot_manager, bot)
     else:
-        # Check for mentions
+        # Try to process mentions first
         try:
             client = bot_manager.get_api_client(bot)
             if not client:
-                return False
+                return process_article_directly(bot_manager, bot)
 
             recent_tweets = bot_manager.execute_request(
                 bot_name=bot.name,
@@ -87,18 +92,24 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
                 max_results=5
             )
 
+            # If rate limited or no tweets, try posting article instead
+            if not recent_tweets:
+                print(f"⚠️ Rate limited or no tweets found, switching to article posting...")
+                return process_article_directly(bot_manager, bot)
+
             if recent_tweets and hasattr(recent_tweets, 'data') and recent_tweets.data:
                 for tweet in recent_tweets.data:
-                    if bot_manager.is_rate_limited(bot.name, "search_recent_tweets"):
-                        break
-
                     replies = bot_manager.execute_request(
                         bot_name=bot.name,
                         request_func=client.search_recent_tweets,
                         endpoint="search_recent_tweets",
                         query=f"conversation_id:{tweet.id}",
-                        max_results=10  # Minimum valeur acceptée par Twitter
+                        max_results=10
                     )
+
+                    # If rate limited on replies, try posting article
+                    if not replies:
+                        return process_article_directly(bot_manager, bot)
 
                     if replies and hasattr(replies, 'data') and replies.data:
                         success = bot_manager.process_mentions(bot)
@@ -106,27 +117,14 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
                             print(f"✅ Replies processed for {bot.name}")
                             break
 
+            # If no successful mention processing, try posting article
             if not success:
-                print(f"No replies to process for {bot.name}")
-                # Si pas de mentions à traiter, on essaie de poster un article
-                try:
-                    rss_feed = fetch_rss(bot.rss_url)
-                    if not rss_feed.empty:
-                        for _, article in rss_feed.iterrows():
-                            if not bot_manager.db.is_title_tweeted(article['title']):
-                                success = bot_manager.process_article(
-                                    bot=bot,
-                                    headline=article['title'],
-                                    description=article['description']
-                                )
-                                if success:
-                                    print(f"✅ New article posted for {bot.name}")
-                                    break
-                except Exception as e:
-                    logger.error(f"Error processing fallback article for {bot.name}: {e}")
+                print(f"No replies to process, trying to post article instead...")
+                success = process_article_directly(bot_manager, bot)
 
         except Exception as e:
             logger.error(f"Error processing mentions for {bot.name}: {e}")
+            success = process_article_directly(bot_manager, bot)
 
     # Save the current action for next time only if successful
     if success:
@@ -170,14 +168,19 @@ def main():
                     time.sleep(2)
 
             # Handle subsequent cycles
+            # Check if all bots are rate limited for the primary endpoint
             if all(bot_manager.is_rate_limited(bot.name, "get_users_tweets") for bot in active_bots):
-                wait_time = min(
-                    max(0, bot_manager.rate_limited[bot.name] - time.time())
-                    for bot in active_bots if bot_manager.is_rate_limited(bot.name)
-                )
-                print(f"\n⚠️ All bots are rate limited. Resuming in {wait_time:.0f} seconds.")
-                countdown_timer(wait_time, "⏳ Waiting for rate limits to reset")
-                bot_manager.clean_expired_limits()
+                wait_times = []
+                for bot in active_bots:
+                    if bot_manager.is_rate_limited(bot.name, "get_users_tweets"):
+                        reset_time = bot_manager.rate_limited_endpoints[bot.name]["get_users_tweets"]
+                        wait_times.append(max(0, reset_time - time.time()))
+                
+                if wait_times:
+                    wait_time = min(wait_times)
+                    print(f"\n⚠️ All bots are rate limited. Resuming in {wait_time:.0f} seconds.")
+                    countdown_timer(int(wait_time), "⏳ Waiting for rate limits to reset")
+                    bot_manager.clean_expired_limits()
             elif success_count > 0:
                 countdown_timer(1800, "⏳ Short wait before the next cycle")
             else:
