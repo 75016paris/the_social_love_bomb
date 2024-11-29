@@ -31,7 +31,7 @@ def countdown_timer(seconds, message):
     print()
 
 def process_bot(bot_manager: BotManager, bot) -> bool:
-    """Process a single bot."""
+    """Process a single bot with optimized rate limit handling."""
     print(f"\n{'=' * 50}")
     print(f"Processing articles for bot: {bot.name}")
     print(f"Identity: {bot.identity[:50]}...")
@@ -43,58 +43,99 @@ def process_bot(bot_manager: BotManager, bot) -> bool:
         print(f"⚠️ Bot {bot.name} is globally rate limited. Skipping...")
         return False
 
-    # Check endpoint-specific rate limit
-    if bot_manager.is_rate_limited(bot.name, "process_articles"):
-        print(f"⚠️ Bot {bot.name} is rate limited for processing articles. Skipping...")
-        return False
-
-    # Step 1: Handle mentions or replies
+    # Use a cache file to track the last action
+    cache_file = bot_manager.cache_dir / f"{bot.name}_last_action.txt"
     try:
-        mentions_result = bot_manager.process_mentions(bot)
-        if mentions_result:
-            print(f"✅ Mentions or replies processed for {bot.name}")
-            return True
-        elif mentions_result == 'PROCESS_ARTICLE':
-            # Continue to process_article
-            pass
-    except Exception as e:
-        logger.error(f"Error processing mentions for bot {bot.name}: {e}", exc_info=True)
+        last_action = "article" if not cache_file.exists() else cache_file.read_text().strip()
+    except Exception:
+        last_action = "article"
 
-    # Step 2: Process articles only if no mentions were handled
-    try:
-        rss_feed = fetch_rss(bot.rss_url)
-        if rss_feed.empty:
-            print(f"No articles found for {bot.name}")
-            return False
+    current_action = "mentions" if last_action == "article" else "article"
+    success = False
 
-        # Iterate through RSS articles
-        for _, article in rss_feed.iterrows():
-            if bot_manager.db.is_title_tweeted(article['title']):
-                print(f"Article already processed: {article['title'][:50]}...")
-                continue
+    # Si l'action est article ou si on est rate limited sur get_users_tweets
+    if current_action == "article" or bot_manager.is_rate_limited(bot.name, "get_users_tweets"):
+        try:
+            rss_feed = fetch_rss(bot.rss_url)
+            if not rss_feed.empty:
+                for _, article in rss_feed.iterrows():
+                    if not bot_manager.db.is_title_tweeted(article['title']):
+                        success = bot_manager.process_article(
+                            bot=bot,
+                            headline=article['title'],
+                            description=article['description']
+                        )
+                        if success:
+                            print(f"✅ New article posted for {bot.name}")
+                            break
+            if not success:
+                print(f"No new articles to post for {bot.name}")
+        except Exception as e:
+            logger.error(f"Error processing article for {bot.name}: {e}")
+    else:
+        # Check for mentions
+        try:
+            client = bot_manager.get_api_client(bot)
+            if not client:
+                return False
 
-            success = bot_manager.process_article(
-                bot=bot,
-                headline=article['title'],
-                description=article['description']
+            recent_tweets = bot_manager.execute_request(
+                bot_name=bot.name,
+                request_func=client.get_users_tweets,
+                endpoint="get_users_tweets",
+                id=bot.user_id,
+                max_results=5
             )
 
-            if success:
-                print(f"✅ Tweet successfully posted for {bot.name}")
-                return True
-            else:
-                print(f"❌ Failed to post tweet for {bot.name}: {article['title'][:50]}...")
+            if recent_tweets and hasattr(recent_tweets, 'data') and recent_tweets.data:
+                for tweet in recent_tweets.data:
+                    if bot_manager.is_rate_limited(bot.name, "search_recent_tweets"):
+                        break
 
-    except tweepy.errors.TooManyRequests as e:
-        reset_time = int(time.time() + 900)  # Default value
-        if hasattr(e, 'response') and hasattr(e.response, 'headers'):
-            reset_time = int(e.response.headers.get('x-rate-limit-reset', reset_time))
-        bot_manager.mark_rate_limited(bot.name, "process_articles", reset_time)
-        print(f"⚠️ Bot {bot.name} rate limited. Will retry after reset.")
-    except Exception as e:
-        logger.error(f"Error processing bot {bot.name}: {e}", exc_info=True)
+                    replies = bot_manager.execute_request(
+                        bot_name=bot.name,
+                        request_func=client.search_recent_tweets,
+                        endpoint="search_recent_tweets",
+                        query=f"conversation_id:{tweet.id}",
+                        max_results=10  # Minimum valeur acceptée par Twitter
+                    )
 
-    return False
+                    if replies and hasattr(replies, 'data') and replies.data:
+                        success = bot_manager.process_mentions(bot)
+                        if success:
+                            print(f"✅ Replies processed for {bot.name}")
+                            break
+
+            if not success:
+                print(f"No replies to process for {bot.name}")
+                # Si pas de mentions à traiter, on essaie de poster un article
+                try:
+                    rss_feed = fetch_rss(bot.rss_url)
+                    if not rss_feed.empty:
+                        for _, article in rss_feed.iterrows():
+                            if not bot_manager.db.is_title_tweeted(article['title']):
+                                success = bot_manager.process_article(
+                                    bot=bot,
+                                    headline=article['title'],
+                                    description=article['description']
+                                )
+                                if success:
+                                    print(f"✅ New article posted for {bot.name}")
+                                    break
+                except Exception as e:
+                    logger.error(f"Error processing fallback article for {bot.name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error processing mentions for {bot.name}: {e}")
+
+    # Save the current action for next time only if successful
+    if success:
+        try:
+            cache_file.write_text(current_action)
+        except Exception as e:
+            logger.error(f"Error saving last action: {e}")
+
+    return success
 
 def main():
     print("🚀 Starting the program...")

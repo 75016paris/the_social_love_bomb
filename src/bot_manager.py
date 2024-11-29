@@ -182,43 +182,45 @@ class BotManager:
 
 
     def execute_request(self, bot_name: str, request_func: Any, endpoint: str, **kwargs) -> Optional[Any]:
-        retries = 3  # Number of retry attempts
+        """Enhanced execute_request with better rate limit handling"""
+        retries = 3
         for attempt in range(retries):
             try:
-                logger.info(f"🔍 Attempting request for {bot_name} - Endpoint: {endpoint}")
-
-                # Check rate limit for this endpoint
+                # Check if we're already rate limited
                 if self.is_rate_limited(bot_name, endpoint):
                     reset_time = self.rate_limited_endpoints[bot_name][endpoint]
                     wait_time = max(0, reset_time - time.time())
-                    logger.info(f"⏳ Waiting {wait_time:.2f}s for bot {bot_name}, endpoint {endpoint} rate limit reset.")
+                    logger.info(f"⏳ Rate limited for {endpoint}, waiting {wait_time:.0f} seconds")
+                    time.sleep(wait_time)  # Wait for the rate limit to reset
+                    continue  # Try again after waiting
 
-                    if endpoint == "search_recent_tweets":
-                        logger.warning(f"Rate limit hit, skipping mentions processing for {bot_name}")
-                        return None  # Simply skip instead of incorrect recursion
-
-                # Make the API request
+                logger.info(f"🔍 Attempting request for {bot_name} - Endpoint: {endpoint}")
                 response = request_func(**kwargs)
                 logger.info(f"📥 Response received for {bot_name} - Endpoint: {endpoint}")
                 return response
 
             except tweepy.errors.TooManyRequests as e:
-                # Handle rate limit error
-                reset_time = self._handle_rate_limit_error(bot_name, endpoint, e)
-                logger.warning(f"⚠️ Rate limit hit for {bot_name}, endpoint {endpoint}.")
-                if endpoint == "search_recent_tweets":
-                    logger.warning(f"Switching to process_article for {bot_name}.")
-                    self.process_article(bot_name)  # Transition to processing articles
-                    return None
-
+                reset_time = int(time.time() + 900)  # Default 15 minutes
+                if hasattr(e, 'response') and 'x-rate-limit-reset' in e.response.headers:
+                    reset_time = int(e.response.headers['x-rate-limit-reset'])
+                
                 wait_time = max(0, reset_time - time.time())
-                time.sleep(wait_time)
+                logger.warning(f"Rate limit hit for {bot_name} on {endpoint}. Waiting {wait_time:.0f} seconds")
+                
+                self.mark_rate_limited(bot_name, endpoint, reset_time)
+                
+                if attempt < retries - 1:  # If not the last attempt
+                    time.sleep(min(wait_time, 60))  # Wait max 1 minute between retries
+                    continue
+                return None
 
             except Exception as e:
-                logger.error(f"❌ Error on attempt {attempt + 1}/{retries} for {bot_name}, endpoint {endpoint}: {e}")
-                time.sleep(2)
+                logger.error(f"Error on attempt {attempt + 1}/{retries} for {bot_name}, endpoint {endpoint}: {e}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+                    continue
+                return None
 
-        logger.error(f"❌ All retries failed for bot {bot_name}, endpoint {endpoint}. Giving up.")
         return None
 
     # Helper functions
@@ -289,50 +291,83 @@ class BotManager:
             return False
 
         try:
-            # Fetch the last tweets of the bot
-            recent_tweets = self.execute_request(
-                bot_name=bot.name,
-                request_func=client.get_users_tweets,
-                endpoint="get_users_tweets",
-                id=bot.user_id,
-                max_results=5
-            )
-
-            if not recent_tweets or not hasattr(recent_tweets, 'data'):
-                logger.info(f"No tweets to process, switching to article")
+            # Check if we're rate limited before making the request
+            if self.is_rate_limited(bot.name, "get_users_tweets"):
+                logger.info(f"Rate limited for get_users_tweets, switching to article processing for {bot.name}")
                 if next_article:
                     return self.process_article(bot, next_article[0], next_article[1])
                 return False
 
-            for tweet in recent_tweets.data:
-                replies = self.execute_request(
+            # Fetch the last tweets of the bot
+            try:
+                recent_tweets = self.execute_request(
                     bot_name=bot.name,
-                    request_func=client.search_recent_tweets,
-                    endpoint="search_recent_tweets",
-                    query=f"conversation_id:{tweet.id}",
-                    max_results=10
+                    request_func=client.get_users_tweets,
+                    endpoint="get_users_tweets",
+                    id=bot.user_id,
+                    max_results=5
                 )
+            except tweepy.errors.TooManyRequests as e:
+                logger.warning(f"Rate limit hit for {bot.name}, switching to article processing")
+                if next_article:
+                    return self.process_article(bot, next_article[0], next_article[1])
+                return False
 
-                if replies and hasattr(replies, 'data') and replies.data:
-                    for reply in replies.data:
-                        if reply.author_id != bot.user_id:
-                            response_text = generate_reply(
-                                headline=tweet.text,
-                                bot_identity=bot.identity,
-                                reply_text=reply.text
-                            )
-                            if response_text:
-                                self.execute_request(
-                                    bot_name=bot.name,
-                                    request_func=client.create_tweet,
-                                    endpoint="reply_tweet",
-                                    text=response_text,
-                                    in_reply_to_tweet_id=reply.id
-                                )
+            replies_processed = False
+            if recent_tweets and hasattr(recent_tweets, 'data'):
+                for tweet in recent_tweets.data:
+                    # Check rate limit before searching replies
+                    if self.is_rate_limited(bot.name, "search_recent_tweets"):
+                        logger.info(f"Rate limited for search_recent_tweets, switching to article for {bot.name}")
+                        if next_article:
+                            return self.process_article(bot, next_article[0], next_article[1])
+                        break
+
+                    try:
+                        replies = self.execute_request(
+                            bot_name=bot.name,
+                            request_func=client.search_recent_tweets,
+                            endpoint="search_recent_tweets",
+                            query=f"conversation_id:{tweet.id}",
+                            max_results=10
+                        )
+
+                        if replies and hasattr(replies, 'data') and replies.data:
+                            replies_processed = True
+                            for reply in replies.data:
+                                if reply.author_id != bot.user_id:
+                                    response_text = generate_reply(
+                                        headline=tweet.text,
+                                        bot_identity=bot.identity,
+                                        reply_text=reply.text
+                                    )
+                                    if response_text:
+                                        self.execute_request(
+                                            bot_name=bot.name,
+                                            request_func=client.create_tweet,
+                                            endpoint="reply_tweet",
+                                            text=response_text,
+                                            in_reply_to_tweet_id=reply.id
+                                        )
+
+                    except tweepy.errors.TooManyRequests as e:
+                        logger.warning(f"Rate limit hit while processing replies for {bot.name}")
+                        if next_article:
+                            return self.process_article(bot, next_article[0], next_article[1])
+                        break
+
+            # If no replies were processed, process the next article
+            if not replies_processed and next_article:
+                logger.info(f"No replies to process for {bot.name}, processing next article...")
+                return self.process_article(bot, next_article[0], next_article[1])
+
             return True
 
         except Exception as e:
             logger.error(f"Error processing mentions for bot {bot.name}: {e}")
+            if next_article:
+                logger.info(f"Switching to article processing due to error for {bot.name}")
+                return self.process_article(bot, next_article[0], next_article[1])
             return False
 
 
